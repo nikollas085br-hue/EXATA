@@ -9,6 +9,7 @@
 #include <M5Cardputer.h>
 #include <SD.h>
 #include <math.h>
+#include <vector>
 
 namespace {
 constexpr int SW = 240;
@@ -423,77 +424,4 @@ void moveHorizontal(int d) {
 void moveVertical(int d) {
     if (page==Page::FILE_VIEW) {
         for (int n=0; n<7; ++n) {
-            if (d<0) { if (fileOffset<=0) break; int p=fileText.lastIndexOf('\n', fileOffset-2); fileOffset=(p<0?0:p+1); }
-            else { if (fileOffset >= (int)fileText.length()) break; int p=fileText.indexOf('\n', fileOffset); fileOffset=(p<0?(int)fileText.length():p+1); }
-        }
-        return;
-    }
-    int count=0;
-    if(page==Page::MENU) count=4;
-    else if(page==Page::PHYSICS) count=9;
-    else if(page==Page::LIBRARY) { String l=SDManager::list(currentPath); count=1; for(int i=0;i<(int)l.length();i++)if(l[i]=='\n')count++; }
-    else if(page==Page::SETTINGS) count=3;
-    else return;
-    menuIndex=(menuIndex+d+count)%count;
-}
-void typeCharacters(const String& chars) {
-    if(!editMode) return;
-    for(size_t i=0;i<chars.length();++i) {
-        char c=chars[i];
-        if(c=='\r'||c=='\n') continue;
-        if(c==8 || c==127) { if(expression.length())expression.remove(expression.length()-1); continue; }
-        if((c>='0'&&c<='9') || (c>='a'&&c<='z') || (c>='A'&&c<='Z') || c=='+'||c=='-'||c=='*'||c=='/'||c=='^'||c=='('||c==')'||c=='.'||c=='='||c=='_'||c==' ') {
-            if(expression.length()<72) expression+=c;
-        }
-    }
-}
-void handleKeys() {
-    if(!M5Cardputer.Keyboard.isPressed()) return;
-    auto keys=M5Cardputer.Keyboard.keysState();
-    if(keys.del) {
-        if(editMode && expression.length()) expression.remove(expression.length()-1);
-        else if(editMode) editMode=false;
-        else if(page==Page::LIBRARY && currentPath!="/EXATA_SD") { int s=currentPath.lastIndexOf('/'); currentPath=(s<=0?String("/EXATA_SD"):currentPath.substring(0,s)); menuIndex=0; }
-        else back();
-        return;
-    }
-    if(keys.enter) {
-        if(page==Page::GRAPH) { editMode=!editMode; return; }
-        if(page==Page::PHYSICS_RESULT && editMode) { output=Physics::solve((uint8_t)physicsChoice, expression); editMode=false; return; }
-        openSelected(); return;
-    }
-    if(editMode) { typeCharacters(keys.word); return; }
-    if ((page==Page::CALC || page==Page::EQUATION) && keys.word.length()) { editMode=true; output=""; typeCharacters(keys.word); return; }
-    for(size_t i=0;i<keys.word.length();++i) {
-        char c=keys.word[i];
-        if(c==','||c=='a'||c=='A') { moveHorizontal(-1); return; }
-        if(c=='/'||c=='d'||c=='D') { moveHorizontal(1); return; }
-        if(c=='w'||c=='W') { moveVertical(-1); return; }
-        if(c=='s'||c=='S') { moveVertical(1); return; }
-        if(c>='1'&&c<='9'&&page==Page::HOME) { homeIndex=(c=='9'?8:c-'1'); if(homeIndex<HOME_COUNT)openHomeTile(); return; }
-        if(c=='0'&&page==Page::HOME) { homeIndex=9; openHomeTile(); return; }
-        if(c=='+'&&page==Page::GRAPH) { return; }
-    }
-    if(page==Page::FILE_VIEW) {
-        for(size_t i=0;i<keys.word.length();i++) {
-            char c=keys.word[i]; if(c=='w'||c=='W') { for(int n=0;n<7 && fileOffset>0;n++) { int p=fileText.lastIndexOf('\n',fileOffset-2); fileOffset=(p<0?0:p+1); } }
-            if(c=='s'||c=='S') { for(int n=0;n<7 && fileOffset<(int)fileText.length();n++) { int p=fileText.indexOf('\n',fileOffset); fileOffset=(p<0?fileText.length():p+1); } }
-        }
-    }
-}
-}
-
-namespace App {
-void begin() {
-    SDManager::begin();
-    page=Page::HOME; homeIndex=0; menuIndex=0; menuScroll=0;
-    M5Cardputer.Display.setRotation(1);
-    M5Cardputer.Display.setBrightness(190);
-    render();
-}
-void update() {
-    bool changed = M5Cardputer.Keyboard.isChange();
-    if (changed) { handleKeys(); render(); }
-    WifiManager::update();
-}
-}
+            if (d<0)
