@@ -1,0 +1,31 @@
+name: Build Cardputer ADV firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main", "master"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build with PlatformIO
+        uses: n-vr/setup-platformio-action@v1
+        with:
+          platformio-version: "6.1.16"
+
+      - name: Compile
+        run: pio run -e m5stack-cardputer
+
+      - name: Publish firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cardputer-Central-Estudos-firmware
+          path: .pio/build/m5stack-cardputer/firmware.bin
+
+
+
+          
