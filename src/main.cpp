@@ -1,199 +1,180 @@
 #include <M5Cardputer.h>
 #include <cmath>
 #include <vector>
+#include <algorithm>
 
-// EXATA - interface inicial para M5Stack Cardputer ADV
-// Teclas: M menu/voltar; W/A/S/D mover gráfico; + e - zoom; C cos; T tan; R raiz; P pi.
+// EXATA — calculadora científica + gráfico. Parser limitado à RAM do ESP32-S3.
+// Equações em uma variável são resolvidas numericamente; não há garantia para toda equação.
 
-static constexpr int SCREEN_W = 240;
-static constexpr int SCREEN_H = 135;
-static constexpr uint16_t C_BG = 0x0841;
-static constexpr uint16_t C_PANEL = 0x18E3;
-static constexpr uint16_t C_ACCENT = 0x07FF;
-static constexpr uint16_t C_TEXT = 0xFFFF;
-static constexpr uint16_t C_MUTED = 0xBDF7;
-static constexpr uint16_t C_ROOT = 0xF800;
+static constexpr int SW=240, SH=135;
+static constexpr uint16_t BG=0x0841, PANEL=0x18E3, ACCENT=0x07FF, TXT=0xFFFF, MUTED=0xBDF7, ROOT=0xF800;
+enum ScreenMode { HOME, CALC, GRAPH, SHORTCUTS, HELP };
+ScreenMode screenMode=HOME;
+double xMin=0.1,xMax=6.0,yMin=-10.0,yMax=20.0;
+String expr="";
+String result="Digite uma expressao";
+String lastShortcut="Nenhum";
+int cursorPos=0;
+bool fractionDenominator=false;
+bool angleDegrees=true;
 
-enum ScreenMode { HOME, GRAPH, SHORTCUTS, HELP };
-ScreenMode screenMode = HOME;
-
-double xMin = 0.1, xMax = 6.0;
-double yMin = -10.0, yMax = 20.0;
-String lastShortcut = "Nenhum atalho selecionado";
-
-// Função de demonstração recebida no código original.
-// Este exemplo ainda não é um parser de expressões matemáticas arbitrárias.
-double evaluateF(double x) {
-  if (std::abs(x) < 1e-12) return NAN;
-  const double term1 = std::pow(2.0, (x * x - 3.0 * x) / x);
-  const double argLog = std::pow(4.0, x) - std::pow(2.0, x + 2.0) + 8.0;
-  if (argLog <= 0.0) return NAN;
-  const double term2 = std::log2(argLog);
-  const double term3 = std::pow(2.0, x + 1.0) - 4.0;
-  return term1 * term2 - term3;
+void header(const char* t){
+ M5.Display.fillRect(0,0,SW,18,PANEL); M5.Display.setTextSize(1);
+ M5.Display.setTextColor(ACCENT,PANEL); M5.Display.setCursor(5,5); M5.Display.print("EXATA");
+ M5.Display.setTextColor(TXT,PANEL); M5.Display.setCursor(58,5); M5.Display.print(t);
 }
 
-double bisection(double a, double b, double tol = 1e-4) {
-  double fa = evaluateF(a);
-  double fb = evaluateF(b);
-  if (!std::isfinite(fa) || !std::isfinite(fb) || fa * fb > 0) return NAN;
-  double c = a;
-  for (int i = 0; i < 80 && (b - a) >= tol; ++i) {
-    c = (a + b) / 2.0;
-    const double fc = evaluateF(c);
-    if (!std::isfinite(fc)) return NAN;
-    if (std::abs(fc) < 1e-10) return c;
-    if (fa * fc < 0) { b = c; fb = fc; }
-    else { a = c; fa = fc; }
+// Recursive-descent expression evaluator: + - * / ^, parentheses, x, pi, e,
+// sin/cos/tan, asin/acos/atan, sqrt, log/log10, ln, abs, exp.
+struct Parser {
+ String s; int p=0; double x=0; bool ok=true;
+ Parser(const String& text,double xv=0):s(text),x(xv){}
+ void ws(){while(p<(int)s.length() && s[p]==' ')p++;}
+ bool eat(char c){ws();if(p<(int)s.length()&&s[p]==c){p++;return true;}return false;}
+ String ident(){ws();int st=p;while(p<(int)s.length()&&((s[p]>='a'&&s[p]<='z')||(s[p]>='A'&&s[p]<='Z')))p++;String q=s.substring(st,p);q.toLowerCase();return q;}
+ double expression(){double v=term();while(ok){if(eat('+'))v+=term();else if(eat('-'))v-=term();else break;}return v;}
+ double term(){double v=power();while(ok){if(eat('*'))v*=power();else if(eat('/')){double d=power();if(fabs(d)<1e-15){ok=false;return NAN;}v/=d;}else break;}return v;}
+ double power(){double v=unary();if(eat('^'))v=pow(v,power());return v;}
+ double unary(){if(eat('+'))return unary();if(eat('-'))return -unary();return atom();}
+ double atom(){
+  ws();if(eat('(')){double v=expression();if(!eat(')'))ok=false;return v;}
+  if(p<(int)s.length()&&((s[p]>='0'&&s[p]<='9')||s[p]=='.')){
+   const char* start=s.c_str()+p;char* end=nullptr;double v=strtod(start,&end);if(end==start){ok=false;return NAN;}p+=(end-start);return v;
   }
-  return c;
-}
-
-std::vector<double> findRoots(double lo, double hi, double step = 0.1) {
-  std::vector<double> roots;
-  for (double x = lo; x < hi; x += step) {
-    const double y1 = evaluateF(x), y2 = evaluateF(x + step);
-    if (!std::isfinite(y1) || !std::isfinite(y2) || y1 * y2 > 0) continue;
-    const double root = bisection(x, x + step);
-    if (!std::isfinite(root)) continue;
-    bool unique = true;
-    for (double old : roots) if (std::abs(old - root) < 1e-3) unique = false;
-    if (unique) roots.push_back(root);
+  String id=ident();
+  if(id.length()){
+   if(id=="x")return x;if(id=="pi")return 3.14159265358979323846;if(id=="e")return 2.71828182845904523536;
+   if(!eat('(')){ok=false;return NAN;}double a=expression();if(!eat(')'))ok=false;
+   if(id=="sin")return sin(angleDegrees?a*0.017453292519943295:a);
+   if(id=="cos")return cos(angleDegrees?a*0.017453292519943295:a);
+   if(id=="tan")return tan(angleDegrees?a*0.017453292519943295:a);
+   if(id=="asin"){double v=asin(a);return angleDegrees?v*57.29577951308232:v;}
+   if(id=="acos"){double v=acos(a);return angleDegrees?v*57.29577951308232:v;}
+   if(id=="atan"){double v=atan(a);return angleDegrees?v*57.29577951308232:v;}
+   if(id=="sqrt"){if(a<0){ok=false;return NAN;}return sqrt(a);}
+   if(id=="ln"){if(a<=0){ok=false;return NAN;}return log(a);}
+   if(id=="log"||id=="log10"){if(a<=0){ok=false;return NAN;}return log10(a);}
+   if(id=="abs")return fabs(a);if(id=="exp")return exp(a);
+   ok=false;return NAN;
   }
-  return roots;
+  ok=false;return NAN;
+ }
+ double run(){double v=expression();ws();if(p!=(int)s.length())ok=false;if(!ok||!isfinite(v))return NAN;return v;}
+};
+bool splitEquation(String in,String &left,String &right){
+ int at=in.indexOf('=');if(at<0)return false;left=in.substring(0,at);right=in.substring(at+1);return left.length()&&right.length();
 }
-
-int mapX(double x) { return int((x - xMin) / (xMax - xMin) * (SCREEN_W - 1)); }
-int mapY(double y) { return int((SCREEN_H - 1) - (y - yMin) / (yMax - yMin) * (SCREEN_H - 1)); }
-
-void header(const char* title) {
-  M5.Display.fillRect(0, 0, SCREEN_W, 18, C_PANEL);
-  M5.Display.setTextColor(C_ACCENT, C_PANEL);
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(6, 5);
-  M5.Display.print("EXATA");
-  M5.Display.setTextColor(C_TEXT, C_PANEL);
-  M5.Display.setCursor(58, 5);
-  M5.Display.print(title);
+double equationValue(const String& l,const String& r,double x,bool &ok){
+ Parser a(l,x),b(r,x);double av=a.run(),bv=b.run();ok=isfinite(av)&&isfinite(bv);return av-bv;
 }
-
-void drawHome() {
-  M5.Display.fillScreen(C_BG);
-  header("CALCULADORA CIENTIFICA");
-  M5.Display.setTextColor(C_ACCENT, C_BG);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(12, 29); M5.Display.print("EXATA");
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(C_TEXT, C_BG);
-  M5.Display.setCursor(13, 51); M5.Display.print("Estudos • Matematica");
-  M5.Display.drawRoundRect(8, 68, 108, 24, 4, C_ACCENT);
-  M5.Display.setCursor(18, 77); M5.Display.print("G  Grafico");
-  M5.Display.drawRoundRect(124, 68, 108, 24, 4, C_ACCENT);
-  M5.Display.setCursor(133, 77); M5.Display.print("M  Atalhos");
-  M5.Display.setTextColor(C_MUTED, C_BG);
-  M5.Display.setCursor(8, 105); M5.Display.print("H: ajuda   G: grafico   M: menu");
-  M5.Display.setCursor(8, 119); M5.Display.print("Setas WASD: mover grafico | +/- zoom");
-}
-
-void drawGraph() {
-  M5.Display.fillScreen(C_BG);
-  auto roots = findRoots(xMin, xMax);
-  // Eixos, quando dentro da janela.
-  int zeroY = mapY(0), zeroX = mapX(0);
-  if (zeroY >= 18 && zeroY < SCREEN_H) M5.Display.drawFastHLine(0, zeroY, SCREEN_W, 0x4208);
-  if (zeroX >= 0 && zeroX < SCREEN_W) M5.Display.drawFastVLine(zeroX, 18, SCREEN_H - 18, 0x4208);
-  int prevX = -1, prevY = -1;
-  for (int px = 0; px < SCREEN_W; ++px) {
-    const double x = xMin + double(px) / double(SCREEN_W - 1) * (xMax - xMin);
-    const double y = evaluateF(x);
-    if (!std::isfinite(y)) { prevX = -1; continue; }
-    const int py = mapY(y);
-    if (py >= 18 && py < SCREEN_H) {
-      if (prevX >= 0 && std::abs(py - prevY) < SCREEN_H / 2) M5.Display.drawLine(prevX, prevY, px, py, C_ACCENT);
-      else M5.Display.drawPixel(px, py, C_ACCENT);
-      prevX = px; prevY = py;
-    } else prevX = -1;
+String calculate(String in){
+ in.trim();if(!in.length())return "Digite uma expressao";
+ String l,r;
+ if(splitEquation(in,l,r)){
+  bool ok1=false,ok2=false;double prevX=-100,prev=equationValue(l,r,prevX,ok1);bool found=false;double root=0;
+  for(double xx=-99.5;xx<=100.0;xx+=0.5){
+   bool ok=false;double cur=equationValue(l,r,xx,ok);
+   if(ok&&ok1&&prev*cur<=0){
+    double a=prevX,b=xx,fa=prev;
+    for(int k=0;k<60;k++){double m=(a+b)/2;bool om=false;double fm=equationValue(l,r,m,om);if(!om)break;if(fabs(fm)<1e-10){a=b=m;break;}if(fa*fm<=0)b=m;else{a=m;fa=fm;}}
+    root=(a+b)/2;found=true;break;
+   }prevX=xx;prev=cur;ok1=ok;
   }
-  for (double r : roots) {
-    int rx = mapX(r), ry = mapY(evaluateF(r));
-    if (rx >= 0 && rx < SCREEN_W && ry >= 18 && ry < SCREEN_H) M5.Display.fillCircle(rx, ry, 3, C_ROOT);
-  }
-  header("GRAFICO f(x)");
-  M5.Display.setTextColor(C_TEXT, C_BG);
-  M5.Display.setCursor(5, 21);
-  if (!roots.empty()) M5.Display.printf("Raiz aprox: %.3f", roots.front());
-  else M5.Display.print("Nenhuma raiz detectada nesta janela");
-  M5.Display.setTextColor(C_MUTED, C_BG);
-  M5.Display.setCursor(5, 124); M5.Display.print("WASD mover  +/- zoom  M menu");
+  if(found)return "x ~= "+String(root,6);
+  return "Sem raiz detectada (-100 a 100)";
+ }
+ Parser p(in);double v=p.run();if(!isfinite(v))return "Erro: sintaxe/dominio";return String(v,8);
 }
+int mapX(double x){return int((x-xMin)/(xMax-xMin)*(SW-1));}
+int mapY(double y){return int((SH-1)-(y-yMin)/(yMax-yMin)*(SH-1));}
+double graphF(double x){Parser p("2^((x*x-3*x)/x)*log(4^x-2^(x+2)+8)/log(2)-(2^(x+1)-4)",x);return p.run();}
 
-void drawShortcuts() {
-  M5.Display.fillScreen(C_BG);
-  header("MENU DE ATALHOS");
-  M5.Display.setTextColor(C_TEXT, C_BG);
-  M5.Display.setCursor(8, 25); M5.Display.print("C  cos(x)       T  tan(x)");
-  M5.Display.setCursor(8, 40); M5.Display.print("S  sin(x)       R  raiz quadrada");
-  M5.Display.setCursor(8, 55); M5.Display.print("P  constante pi  L  log10(x)");
-  M5.Display.setCursor(8, 70); M5.Display.print("N  ln(x)         E  numero e");
-  M5.Display.setCursor(8, 91); M5.Display.setTextColor(C_ACCENT, C_BG); M5.Display.print("Atalho: "); M5.Display.print(lastShortcut);
-  M5.Display.setTextColor(C_MUTED, C_BG);
-  M5.Display.setCursor(8, 119); M5.Display.print("M volta | H ajuda | G abre grafico");
+void drawHome(){
+ M5.Display.fillScreen(BG);header("CALCULADORA UNIVERSAL");
+ M5.Display.setTextColor(ACCENT,BG);M5.Display.setTextSize(2);M5.Display.setCursor(12,27);M5.Display.print("EXATA");
+ M5.Display.setTextSize(1);M5.Display.setTextColor(TXT,BG);
+ M5.Display.setCursor(12,51);M5.Display.print("Matematica cientifica");
+ M5.Display.drawRoundRect(7,65,109,25,4,ACCENT);M5.Display.setCursor(16,74);M5.Display.print("ENTER Calculadora");
+ M5.Display.drawRoundRect(124,65,108,25,4,ACCENT);M5.Display.setCursor(133,74);M5.Display.print("G Grafico");
+ M5.Display.setCursor(8,101);M5.Display.print("M atalhos  H ajuda  F fracao");
+ M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(8,119);M5.Display.print("Digite expressoes e pressione ENTER");
 }
-
-void drawHelp() {
-  M5.Display.fillScreen(C_BG); header("AJUDA RAPIDA");
-  M5.Display.setTextColor(C_TEXT, C_BG);
-  M5.Display.setCursor(8, 27); M5.Display.print("M  menu de atalhos / voltar");
-  M5.Display.setCursor(8, 43); M5.Display.print("G  abrir grafico da funcao");
-  M5.Display.setCursor(8, 59); M5.Display.print("W/A/S/D  deslocar a janela");
-  M5.Display.setCursor(8, 75); M5.Display.print("+/-  aproximar / afastar");
-  M5.Display.setCursor(8, 91); M5.Display.print("C/T/S/R/P/L/N/E  atalhos matematicos");
-  M5.Display.setTextColor(C_MUTED, C_BG);
-  M5.Display.setCursor(8, 119); M5.Display.print("Teclas inserem atalhos informativos.");
+void drawCalc(){
+ M5.Display.fillScreen(BG);header("CALCULADORA");
+ M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(5,23);M5.Display.print("EXPRESSAO (x para variavel)");
+ M5.Display.setTextColor(ACCENT,BG);M5.Display.setCursor(5,38);
+ String shown=expr;if(shown.length()>34)shown=shown.substring(shown.length()-34);
+ M5.Display.print(shown);M5.Display.setTextColor(TXT,BG);
+ M5.Display.setCursor(5,56);M5.Display.print("Resultado:");
+ M5.Display.setTextColor(ACCENT,BG);M5.Display.setCursor(5,69);M5.Display.print(result);
+ M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(5,91);M5.Display.print("F fracao  TAB denominador");
+ M5.Display.setCursor(5,105);M5.Display.print("S sin C cos T tan R sqrt P pi");
+ M5.Display.setCursor(5,119);M5.Display.print("ENTER calcular | M menu | DEL apaga");
 }
-
-void redraw() {
-  if (screenMode == HOME) drawHome();
-  else if (screenMode == GRAPH) drawGraph();
-  else if (screenMode == SHORTCUTS) drawShortcuts();
-  else drawHelp();
+void drawGraph(){
+ M5.Display.fillScreen(BG);
+ int zy=mapY(0),zx=mapX(0);if(zy>=18&&zy<SH)M5.Display.drawFastHLine(0,zy,SW,0x4208);if(zx>=0&&zx<SW)M5.Display.drawFastVLine(zx,18,SH-18,0x4208);
+ int px0=-1,py0=-1;for(int px=0;px<SW;px++){double x=xMin+double(px)/(SW-1)*(xMax-xMin),y=graphF(x);if(!isfinite(y)){px0=-1;continue;}int py=mapY(y);if(py>=18&&py<SH){if(px0>=0&&abs(py-py0)<SH/2)M5.Display.drawLine(px0,py0,px,py,ACCENT);else M5.Display.drawPixel(px,py,ACCENT);px0=px;py0=py;}else px0=-1;}
+ header("GRAFICO DEMO");M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(4,120);M5.Display.print("WASD mover +/- zoom M menu");
 }
-
-void handleKey(char key) {
-  if (key >= 'a' && key <= 'z') key = char(key - 'a' + 'A');
-  if (key == 'M') { screenMode = (screenMode == SHORTCUTS) ? HOME : SHORTCUTS; redraw(); return; }
-  if (key == 'H') { screenMode = HELP; redraw(); return; }
-  if (key == 'G') { screenMode = GRAPH; redraw(); return; }
-  if (key == 'C') lastShortcut = "cos(x)";
-  else if (key == 'T') lastShortcut = "tan(x)";
-  else if (key == 'S') lastShortcut = "sin(x)";
-  else if (key == 'R') lastShortcut = "sqrt(x) - raiz quadrada";
-  else if (key == 'P') lastShortcut = "pi = 3.14159265...";
-  else if (key == 'L') lastShortcut = "log10(x)";
-  else if (key == 'N') lastShortcut = "ln(x)";
-  else if (key == 'E') lastShortcut = "e = 2.71828182...";
-  else if (screenMode == GRAPH && (key == 'W' || key == 'A' || key == 'S' || key == 'D' || key == '+' || key == '-')) {
-    if (key == 'W' || key == 'S') { double dy = (yMax - yMin) * 0.1; if (key == 'W') { yMin += dy; yMax += dy; } else { yMin -= dy; yMax -= dy; } }
-    if (key == 'A' || key == 'D') { double dx = (xMax - xMin) * 0.1; if (key == 'A') { xMin -= dx; xMax -= dx; } else { xMin += dx; xMax += dx; } }
-    if (key == '+' || key == '-') { double dx = (xMax - xMin) * 0.2; if (key == '+') { xMin += dx; xMax -= dx; } else { xMin -= dx; xMax += dx; } }
-  }
-  redraw();
+void drawShortcuts(){
+ M5.Display.fillScreen(BG);header("ATALHOS");
+ M5.Display.setTextColor(TXT,BG);
+ M5.Display.setCursor(7,25);M5.Display.print("S sin(x)   C cos(x)   T tan(x)");
+ M5.Display.setCursor(7,40);M5.Display.print("R sqrt(x)  L log(x)   N ln(x)");
+ M5.Display.setCursor(7,55);M5.Display.print("P pi        E constante e");
+ M5.Display.setCursor(7,70);M5.Display.print("F inserir modelo de fracao");
+ M5.Display.setCursor(7,88);M5.Display.setTextColor(ACCENT,BG);M5.Display.print(lastShortcut);
+ M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(7,119);M5.Display.print("M volta | ENTER abre calculadora");
 }
-
-void setup() {
-  auto cfg = M5.config();
-  M5Cardputer.begin(cfg, true);
-  M5.Display.setRotation(1);
-  M5.Display.setTextSize(1);
-  redraw();
+void drawHelp(){M5.Display.fillScreen(BG);header("AJUDA");M5.Display.setTextColor(TXT,BG);
+ M5.Display.setCursor(5,27);M5.Display.print("+ - * / ^ e parenteses");
+ M5.Display.setCursor(5,42);M5.Display.print("Funcoes: sin cos tan sqrt log ln");
+ M5.Display.setCursor(5,57);M5.Display.print("Equacao: 2*x+3=9 (resolve x numerico)");
+ M5.Display.setCursor(5,72);M5.Display.print("F cria ( )/( ); TAB vai ao denominador");
+ M5.Display.setCursor(5,87);M5.Display.print("Trigonometria em graus por padrao");
+ M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(5,119);M5.Display.print("M volta | ENTER calcula");}
+void redraw(){if(screenMode==HOME)drawHome();else if(screenMode==CALC)drawCalc();else if(screenMode==GRAPH)drawGraph();else if(screenMode==SHORTCUTS)drawShortcuts();else drawHelp();}
+void insertText(String t){expr=expr.substring(0,cursorPos)+t+expr.substring(cursorPos);cursorPos+=t.length();}
+void handleKey(char k){
+ if(k>='a'&&k<='z')k-=32;
+ if(k=='M'){screenMode=(screenMode==HOME)?SHORTCUTS:HOME;redraw();return;}
+ if(k=='H'){screenMode=HELP;redraw();return;}
+ if(k=='G'){screenMode=GRAPH;redraw();return;}
+ if(k=='F'&&screenMode==CALC){insertText("( )/( )");cursorPos-=5;fractionDenominator=false;redraw();return;}
+ if(screenMode==HOME&&k=='\n'){screenMode=CALC;redraw();return;}
+ if(screenMode==CALC){
+  if(k=='\n'||k=='='){result=calculate(expr);redraw();return;}
+  if(k==8||k==127){if(cursorPos>0){expr.remove(cursorPos-1,1);cursorPos--;}redraw();return;}
+  if(k=='>'){int d=expr.indexOf(")/(");if(d>=0){cursorPos=d+2;fractionDenominator=true;}redraw();return;}
+  if(k=='S'){insertText("sin()");cursorPos--;lastShortcut="sin(x)";}
+  else if(k=='C'){insertText("cos()");cursorPos--;}
+  else if(k=='T'){insertText("tan()");cursorPos--;}
+  else if(k=='R'){insertText("sqrt()");cursorPos--;}
+  else if(k=='L'){insertText("log()");cursorPos--;}
+  else if(k=='N'){insertText("ln()");cursorPos--;}
+  else if(k=='P'){insertText("pi");}
+  else if(k=='E'){insertText("e");}
+  else if(k==' '){insertText(" ");}
+  else if((k>='0'&&k<='9')||k=='.'||k=='+'||k=='-'||k=='*'||k=='/'||k=='^'||k=='('||k==')'||k=='='||k=='x'||k=='X'){insertText(String(k));}
+  redraw();return;
+ }
+ if(screenMode==GRAPH){
+  if(k=='W'||k=='S'){double d=(yMax-yMin)*.1;if(k=='W'){yMin+=d;yMax+=d;}else{yMin-=d;yMax-=d;}}
+  if(k=='A'||k=='D'){double d=(xMax-xMin)*.1;if(k=='A'){xMin-=d;xMax-=d;}else{xMin+=d;xMax+=d;}}
+  if(k=='+'||k=='-'){double d=(xMax-xMin)*.2;if(k=='+'){xMin+=d;xMax-=d;}else{xMin-=d;xMax+=d;}}
+ }
+ if(screenMode==SHORTCUTS){if(k=='C')lastShortcut="cos(x)";else if(k=='T')lastShortcut="tan(x)";else if(k=='S')lastShortcut="sin(x)";else if(k=='R')lastShortcut="sqrt(x)";else if(k=='P')lastShortcut="pi";else if(k=='F')lastShortcut="fracao";}
+ redraw();
 }
-
-void loop() {
-  M5Cardputer.update();
-  if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
-    auto keys = M5Cardputer.Keyboard.keysState();
-    for (auto key : keys.word) handleKey(key);
-    if (keys.enter) handleKey('G');
-  }
-  delay(20);
+void setup(){auto cfg=M5.config();M5Cardputer.begin(cfg,true);M5.Display.setRotation(1);M5.Display.setTextSize(1);redraw();}
+void loop(){
+ M5Cardputer.update();
+ if(M5Cardputer.Keyboard.isChange()&&M5Cardputer.Keyboard.isPressed()){
+  auto keys=M5Cardputer.Keyboard.keysState();
+  for(auto k:keys.word)handleKey(k);
+  if(keys.enter)handleKey('\n');
+  if(keys.del&&screenMode==CALC){handleKey(8);}
+ }
+ delay(20);
 }
