@@ -10,7 +10,7 @@ static constexpr int SW=240, SH=135;
 static constexpr uint16_t BG=0x0841, PANEL=0x18E3, ACCENT=0x07FF, TXT=0xFFFF, MUTED=0xBDF7, ROOT=0xF800;
 enum ScreenMode { HOME, CALC, GRAPH, SHORTCUTS, HELP };
 ScreenMode screenMode=HOME;
-double xMin=0.1,xMax=6.0,yMin=-10.0,yMax=20.0;
+double xMin=-10.0,xMax=10.0,yMin=-10.0,yMax=20.0;
 String expr="";
 String result="Digite uma expressao";
 String lastShortcut="Nenhum";
@@ -33,7 +33,20 @@ struct Parser {
  bool eat(char c){ws();if(p<(int)s.length()&&s[p]==c){p++;return true;}return false;}
  String ident(){ws();int st=p;while(p<(int)s.length()&&((s[p]>='a'&&s[p]<='z')||(s[p]>='A'&&s[p]<='Z')))p++;String q=s.substring(st,p);q.toLowerCase();return q;}
  double expression(){double v=term();while(ok){if(eat('+'))v+=term();else if(eat('-'))v-=term();else break;}return v;}
- double term(){double v=power();while(ok){if(eat('*'))v*=power();else if(eat('/')){double d=power();if(fabs(d)<1e-15){ok=false;return NAN;}v/=d;}else break;}return v;}
+ double term(){
+  double v=power();
+  while(ok){
+   if(eat('*'))v*=power();
+   else if(eat('/')){double d=power();if(fabs(d)<1e-15){ok=false;return NAN;}v/=d;}
+   else {
+    ws(); char c=(p<(int)s.length())?s[p]:'\0';
+    // Multiplicacao implicita: 2x, 3(x+1), 2pi, 2sin(x).
+    if((c=='x'||c=='X'||c=='(')||((c>='a'&&c<='z')||(c>='A'&&c<='Z'))) v*=power();
+    else break;
+   }
+  }
+  return v;
+ }
  double power(){double v=unary();if(eat('^'))v=pow(v,power());return v;}
  double unary(){if(eat('+'))return unary();if(eat('-'))return -unary();return atom();}
  double atom(){
@@ -71,23 +84,30 @@ String calculate(String in){
  in.trim();if(!in.length())return "Digite uma expressao";
  String l,r;
  if(splitEquation(in,l,r)){
-  bool ok1=false,ok2=false;double prevX=-100,prev=equationValue(l,r,prevX,ok1);bool found=false;double root=0;
-  for(double xx=-99.5;xx<=100.0;xx+=0.5){
-   bool ok=false;double cur=equationValue(l,r,xx,ok);
-   if(ok&&ok1&&prev*cur<=0){
-    double a=prevX,b=xx,fa=prev;
-    for(int k=0;k<60;k++){double m=(a+b)/2;bool om=false;double fm=equationValue(l,r,m,om);if(!om)break;if(fabs(fm)<1e-10){a=b=m;break;}if(fa*fm<=0)b=m;else{a=m;fa=fm;}}
-    root=(a+b)/2;found=true;break;
-   }prevX=xx;prev=cur;ok1=ok;
+  const double lo=-100.0, hi=100.0, step=0.25;
+  std::vector<double> roots;
+  bool prevOk=false;double prevX=lo;bool ok=false;double prev=equationValue(l,r,prevX,ok);prevOk=ok;
+  for(double xx=lo+step;xx<=hi+1e-9;xx+=step){
+   bool curOk=false;double cur=equationValue(l,r,xx,curOk);
+   if(curOk&&prevOk&&prev*cur<=0){
+    double a=prevX,b=xx,fa=prev;bool valid=true;
+    for(int k=0;k<55;k++){double m=(a+b)/2;bool om=false;double fm=equationValue(l,r,m,om);if(!om){valid=false;break;}if(fabs(fm)<1e-10){a=b=m;break;}if(fa*fm<=0)b=m;else{a=m;fa=fm;}}
+    if(valid){double root=(a+b)/2;bool fresh=true;for(double old:roots)if(fabs(old-root)<1e-3){fresh=false;break;}if(fresh&&roots.size()<8)roots.push_back(root);}
+   }
+   prevX=xx;prev=cur;prevOk=curOk;
   }
-  if(found)return "x ~= "+String(root,6);
-  return "Sem raiz detectada (-100 a 100)";
+  if(roots.empty())return "Sem raiz detectada (-100 a 100)";
+  String out="";for(size_t i=0;i<roots.size();i++){if(i)out+=" ";out+="x"+String((int)i+1)+"="+String(roots[i],3);}return out;
  }
  Parser p(in);double v=p.run();if(!isfinite(v))return "Erro: sintaxe/dominio";return String(v,8);
 }
 int mapX(double x){return int((x-xMin)/(xMax-xMin)*(SW-1));}
 int mapY(double y){return int((SH-1)-(y-yMin)/(yMax-yMin)*(SH-1));}
-double graphF(double x){Parser p("2^((x*x-3*x)/x)*log(4^x-2^(x+2)+8)/log(2)-(2^(x+1)-4)",x);return p.run();}
+double graphF(double x){
+ String left,right;
+ if(splitEquation(expr,left,right)){bool ok=false;return equationValue(left,right,x,ok);}
+ Parser p(expr,x);return p.run();
+}
 
 void drawHome(){
  M5.Display.fillScreen(BG);header("CALCULADORA UNIVERSAL");
@@ -103,19 +123,25 @@ void drawCalc(){
  M5.Display.fillScreen(BG);header("CALCULADORA");
  M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(5,23);M5.Display.print("EXPRESSAO (x para variavel)");
  M5.Display.setTextColor(ACCENT,BG);M5.Display.setCursor(5,38);
- String shown=expr;if(shown.length()>34)shown=shown.substring(shown.length()-34);
- M5.Display.print(shown);M5.Display.setTextColor(TXT,BG);
+ // Janela horizontal acompanha o cursor para permitir editar expressoes longas.
+ int start=cursorPos-28;if(start<0)start=0;
+ String shown=expr.substring(start,start+34);
+ M5.Display.print(shown);
+ int cx=5+(cursorPos-start)*6;
+ if(cx>5+34*6)cx=5+34*6;
+ M5.Display.drawFastVLine(cx,36,12,YELLOW);
+ M5.Display.setTextColor(TXT,BG);
  M5.Display.setCursor(5,56);M5.Display.print("Resultado:");
  M5.Display.setTextColor(ACCENT,BG);M5.Display.setCursor(5,69);M5.Display.print(result);
- M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(5,91);M5.Display.print("F fracao  TAB denominador");
+ M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(5,91);M5.Display.print("F fracao  > denominador");
  M5.Display.setCursor(5,105);M5.Display.print("S sin C cos T tan R sqrt P pi");
- M5.Display.setCursor(5,119);M5.Display.print("ENTER calcular | M menu | DEL apaga");
+ M5.Display.setCursor(5,119);M5.Display.print("ENTER resolver | ESC volta | DEL apaga");
 }
 void drawGraph(){
  M5.Display.fillScreen(BG);
  int zy=mapY(0),zx=mapX(0);if(zy>=18&&zy<SH)M5.Display.drawFastHLine(0,zy,SW,0x4208);if(zx>=0&&zx<SW)M5.Display.drawFastVLine(zx,18,SH-18,0x4208);
  int px0=-1,py0=-1;for(int px=0;px<SW;px++){double x=xMin+double(px)/(SW-1)*(xMax-xMin),y=graphF(x);if(!isfinite(y)){px0=-1;continue;}int py=mapY(y);if(py>=18&&py<SH){if(px0>=0&&abs(py-py0)<SH/2)M5.Display.drawLine(px0,py0,px,py,ACCENT);else M5.Display.drawPixel(px,py,ACCENT);px0=px;py0=py;}else px0=-1;}
- header("GRAFICO DEMO");M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(4,120);M5.Display.print("WASD mover +/- zoom M menu");
+ header("GRAFICO DA EXPRESSAO");M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(4,120);M5.Display.print("WASD mover +/- zoom ESC volta");
 }
 void drawShortcuts(){
  M5.Display.fillScreen(BG);header("ATALHOS");
@@ -131,22 +157,27 @@ void drawHelp(){M5.Display.fillScreen(BG);header("AJUDA");M5.Display.setTextColo
  M5.Display.setCursor(5,27);M5.Display.print("+ - * / ^ e parenteses");
  M5.Display.setCursor(5,42);M5.Display.print("Funcoes: sin cos tan sqrt log ln");
  M5.Display.setCursor(5,57);M5.Display.print("Equacao: 2*x+3=9 (resolve x numerico)");
- M5.Display.setCursor(5,72);M5.Display.print("F cria ( )/( ); TAB vai ao denominador");
+ M5.Display.setCursor(5,72);M5.Display.print("F fracao; > vai denominador; Q =");
  M5.Display.setCursor(5,87);M5.Display.print("Trigonometria em graus por padrao");
- M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(5,119);M5.Display.print("M volta | ENTER calcula");}
+ M5.Display.setTextColor(MUTED,BG);M5.Display.setCursor(5,119);M5.Display.print("ESC/M volta | ENTER calcula");}
 void redraw(){if(screenMode==HOME)drawHome();else if(screenMode==CALC)drawCalc();else if(screenMode==GRAPH)drawGraph();else if(screenMode==SHORTCUTS)drawShortcuts();else drawHelp();}
 void insertText(String t){expr=expr.substring(0,cursorPos)+t+expr.substring(cursorPos);cursorPos+=t.length();}
 void handleKey(char k){
+ // Controles de cursor: setas ASCII/teclas de navegacao quando reportadas pelo firmware.
+ if(screenMode==CALC && (k=='<' || k=='[' || (unsigned char)k==0x1C)) {if(cursorPos>0)cursorPos--;redraw();return;}
+ if(screenMode==CALC && (k==']' || (unsigned char)k==0x1D)) {if(cursorPos<(int)expr.length())cursorPos++;redraw();return;}
  if(k>='a'&&k<='z')k-=32;
- if(k=='M'){screenMode=(screenMode==HOME)?SHORTCUTS:HOME;redraw();return;}
+ if(k==27){screenMode=(screenMode==GRAPH||screenMode==HELP||screenMode==SHORTCUTS)?CALC:HOME;redraw();return;}
+ if(k=='M'){screenMode=(screenMode==HOME)?SHORTCUTS:(screenMode==CALC?HOME:CALC);redraw();return;}
  if(k=='H'){screenMode=HELP;redraw();return;}
  if(k=='G'){screenMode=GRAPH;redraw();return;}
  if(k=='F'&&screenMode==CALC){insertText("( )/( )");cursorPos-=5;fractionDenominator=false;redraw();return;}
  if(screenMode==HOME&&k=='\n'){screenMode=CALC;redraw();return;}
  if(screenMode==CALC){
   if(k=='\n'||k=='='){result=calculate(expr);redraw();return;}
+  if(k=='Q'){insertText("=");redraw();return;}
   if(k==8||k==127){if(cursorPos>0){expr.remove(cursorPos-1,1);cursorPos--;}redraw();return;}
-  if(k=='>'){int d=expr.indexOf(")/(");if(d>=0){cursorPos=d+2;fractionDenominator=true;}redraw();return;}
+  if(k=='>'){int d=expr.indexOf(")/(");if(d>=0){cursorPos=d+2;fractionDenominator=true;}else if(cursorPos<(int)expr.length())cursorPos++;redraw();return;}
   if(k=='S'){insertText("sin()");cursorPos--;lastShortcut="sin(x)";}
   else if(k=='C'){insertText("cos()");cursorPos--;}
   else if(k=='T'){insertText("tan()");cursorPos--;}
@@ -160,6 +191,7 @@ void handleKey(char k){
   redraw();return;
  }
  if(screenMode==GRAPH){
+  if(k==8||k==127){screenMode=CALC;redraw();return;}
   if(k=='W'||k=='S'){double d=(yMax-yMin)*.1;if(k=='W'){yMin+=d;yMax+=d;}else{yMin-=d;yMax-=d;}}
   if(k=='A'||k=='D'){double d=(xMax-xMin)*.1;if(k=='A'){xMin-=d;xMax-=d;}else{xMin+=d;xMax+=d;}}
   if(k=='+'||k=='-'){double d=(xMax-xMin)*.2;if(k=='+'){xMin+=d;xMax-=d;}else{xMin-=d;xMax+=d;}}
@@ -174,7 +206,7 @@ void loop(){
   auto keys=M5Cardputer.Keyboard.keysState();
   for(auto k:keys.word)handleKey(k);
   if(keys.enter)handleKey('\n');
-  if(keys.del&&screenMode==CALC){handleKey(8);}
+  if(keys.del){handleKey(8);}
  }
  delay(20);
 }
