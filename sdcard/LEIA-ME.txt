@@ -1,0 +1,13 @@
+COPIE O CONTEUDO DESTA PASTA PARA A RAIZ DO CARTAO microSD.
+
+Estrutura esperada:
+/hotspot-adv.cfg (criado automaticamente pelo firmware)
+/sites/exemplo/index.html
+/sites/exemplo/style.css
+/sites/exemplo/app.js
+
+Para adicionar um site, crie outra pasta dentro de /sites e coloque nela index.html e os recursos do site.
+No Cardputer, escolha "Escolher site do SD" e digite o nome da pasta (ex.: exemplo).
+O servidor suporta HTML, CSS, JavaScript, JSON, SVG, PNG, JPG, GIF, TXT e WASM.
+
+Atenção: o microSD deve estar formatado em FAT32. O hotspot é uma rede local e não fornece internet externa automaticamente.
